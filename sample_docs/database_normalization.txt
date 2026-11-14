@@ -1,0 +1,9 @@
+Database Normalization
+
+Normalization organizes relational database tables to reduce repeated data and prevent update anomalies. A table should describe one kind of entity, and each row should be uniquely identifiable by a key.
+
+First normal form (1NF) requires each cell to contain one atomic value and each record to be unique. For example, store one phone number per cell instead of a comma-separated list.
+
+Second normal form (2NF) requires 1NF and requires every non-key attribute to depend on the whole candidate key. This matters when a table uses a composite key.
+
+Third normal form (3NF) requires 2NF and removes transitive dependencies. Non-key attributes should depend on the key, the whole key, and nothing but the key.

@@ -1,0 +1,9 @@
+Operating System Basics
+
+An operating system manages computer hardware and provides common services to applications. Its kernel is the central part that runs with privileged access.
+
+Process management creates, schedules, and ends processes. A process is a program in execution. The scheduler chooses which ready process receives CPU time.
+
+Memory management tracks the use of main memory and allocates space to processes. Virtual memory allows a system to use secondary storage to extend the apparent amount of available memory.
+
+File systems organize data into files and directories. Device drivers let the operating system communicate with hardware devices.
