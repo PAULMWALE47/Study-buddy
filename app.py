@@ -1,4 +1,5 @@
 import io
+import html
 import json
 import os
 import re
@@ -440,22 +441,22 @@ st.markdown(
     """
     <style>
     :root {
-        --ink: #17263c;
-        --muted: #64748b;
-        --accent: #148a78;
-        --line: #e2e8f0;
-        --surface: #ffffff;
+        --ink: #3e2a20;
+        --muted: #806a5b;
+        --accent: #8b5e3c;
+        --line: #e6d7c6;
+        --surface: #fffcf5;
     }
 
     [data-testid="stAppViewContainer"] {
-        background: #f5f7fb;
+        background: #f8f3e9;
         color: var(--ink);
     }
     [data-testid="stHeader"] {
         background: transparent;
     }
     [data-testid="stSidebar"] {
-        background: #edf2f7;
+        background: #efe3d3;
         border-right: 1px solid var(--line);
     }
     [data-testid="stSidebar"] h1,
@@ -476,10 +477,10 @@ st.markdown(
     .study-hero {
         padding: 2rem 2.2rem;
         margin-bottom: 1.5rem;
-        border: 1px solid #dce8e7;
+        border: 1px solid #e5d2bd;
         border-radius: 22px;
-        background: linear-gradient(120deg, #ffffff 15%, #e8f5f2 100%);
-        box-shadow: 0 12px 32px rgba(23, 38, 60, 0.06);
+        background: linear-gradient(120deg, #fffdf8 15%, #f1e4d2 100%);
+        box-shadow: 0 12px 32px rgba(62, 42, 32, 0.07);
     }
     .study-hero .eyebrow {
         color: var(--accent);
@@ -520,7 +521,7 @@ st.markdown(
     }
     div[data-testid="stTabs"] button[role="tab"][aria-selected="true"] {
         color: var(--accent) !important;
-        background: #e8f5f2;
+        background: #f1e5d4;
     }
     h2, h3 {
         color: var(--ink);
@@ -530,18 +531,29 @@ st.markdown(
     div[data-testid="stDownloadButton"] > button {
         min-height: 2.7rem;
         padding: 0.55rem 1.05rem;
-        border: 1px solid #cbd9df;
+        border: 1px solid var(--accent);
         border-radius: 10px;
-        color: var(--ink);
-        background: var(--surface);
+        color: #fffcf5;
+        background: var(--accent);
         font-weight: 650;
-        transition: border-color 120ms ease, background 120ms ease, transform 120ms ease;
+        box-shadow: 0 3px 8px rgba(62, 42, 32, 0.12);
+        transition: border-color 120ms ease, background 120ms ease, transform 120ms ease, box-shadow 120ms ease;
     }
     div[data-testid="stButton"] > button:hover,
     div[data-testid="stDownloadButton"] > button:hover {
-        border-color: var(--accent);
-        color: var(--accent);
+        border-color: #70472d;
+        color: #fffcf5;
+        background: #70472d;
         transform: translateY(-1px);
+        box-shadow: 0 5px 12px rgba(62, 42, 32, 0.18);
+    }
+    div[data-testid="stButton"] > button:disabled,
+    div[data-testid="stDownloadButton"] > button:disabled {
+        border-color: #d7c7b4;
+        color: #806a5b;
+        background: #e8ddce;
+        box-shadow: none;
+        transform: none;
     }
     div[data-testid="stFileUploader"],
     div[data-testid="stExpander"],
@@ -552,7 +564,7 @@ st.markdown(
         background: var(--surface);
     }
     div[data-testid="stFileUploader"] [data-testid="stFileUploaderDropzone"] {
-        border: 1px dashed #b9c9d2;
+        border: 1px dashed #c5aa8b;
         border-radius: 12px;
         background: var(--surface);
     }
@@ -561,10 +573,10 @@ st.markdown(
         color: var(--muted) !important;
     }
     div[data-testid="stFileUploader"] button {
-        border: 1px solid #cbd9df;
+        border: 1px solid var(--accent);
         border-radius: 9px;
-        color: var(--ink) !important;
-        background: #ffffff !important;
+        color: #fffcf5 !important;
+        background: var(--accent) !important;
     }
     div[data-testid="stChatMessage"] {
         padding: 0.5rem 0.8rem;
@@ -576,7 +588,7 @@ st.markdown(
     [data-baseweb="input"] > div,
     [data-baseweb="textarea"] > div,
     [data-baseweb="select"] > div {
-        border-color: #d5dee8;
+        border-color: #d8c8b5;
         border-radius: 10px;
         background: var(--surface) !important;
     }
@@ -587,6 +599,75 @@ st.markdown(
     }
     [data-testid="stAlert"] {
         border-radius: 12px;
+    }
+    .flashcard-stage {
+        margin: 1.4rem 0;
+        perspective: 1200px;
+        animation: flashcard-arrive 420ms ease-out both;
+    }
+    .study-flashcard {
+        position: relative;
+        min-height: 310px;
+        transform-style: preserve-3d;
+        transition: transform 760ms cubic-bezier(0.2, 0.75, 0.25, 1);
+    }
+    .study-flashcard.is-flipped {
+        transform: rotateY(180deg);
+    }
+    .flashcard-face {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        padding: 2rem 2.2rem;
+        overflow: hidden;
+        border: 1px solid #e2cfb7;
+        border-radius: 22px;
+        backface-visibility: hidden;
+        -webkit-backface-visibility: hidden;
+        box-shadow: 0 18px 38px rgba(62, 42, 32, 0.13);
+    }
+    .flashcard-front {
+        background: linear-gradient(135deg, #fffef9 10%, #f2e7d8 100%);
+    }
+    .flashcard-back {
+        transform: rotateY(180deg);
+        border-color: #d4b99b;
+        background: linear-gradient(135deg, #f5e8d8 10%, #e8d2ba 100%);
+    }
+    .flashcard-label {
+        margin-bottom: 1rem;
+        color: var(--accent);
+        font-size: 0.76rem;
+        font-weight: 750;
+        letter-spacing: 0.14em;
+    }
+    .flashcard-back .flashcard-label {
+        color: #765033;
+    }
+    .flashcard-text {
+        max-height: 190px;
+        overflow-y: auto;
+        color: var(--ink);
+        font-size: clamp(1.25rem, 2.6vw, 1.8rem);
+        font-weight: 650;
+        line-height: 1.5;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+    }
+    .flashcard-hint {
+        margin-top: 1.4rem;
+        color: var(--muted);
+        font-size: 0.9rem;
+    }
+    @keyframes flashcard-arrive {
+        from { opacity: 0; transform: translateY(12px) scale(0.985); }
+        to { opacity: 1; transform: translateY(0) scale(1); }
+    }
+    @media (prefers-reduced-motion: reduce) {
+        .flashcard-stage { animation: none; }
+        .study-flashcard { transition: none; }
     }
     @media (max-width: 700px) {
         .block-container {
@@ -739,14 +820,38 @@ with cards_tab:
     active_key = st.session_state.active_flashcards_key
     if active_key in st.session_state.flashcards_cache:
         cards = st.session_state.flashcards_cache[active_key]
-        card = cards[st.session_state.flashcard_index]
-        st.markdown(f"**Card {st.session_state.flashcard_index + 1} of {len(cards)}**")
-        st.markdown(f"### {card['front']}")
-        if st.button("Show answer", disabled=st.session_state.show_flashcard_answer):
-            st.session_state.show_flashcard_answer = True
+        card_index = st.session_state.flashcard_index
+        card = cards[card_index]
+        is_flipped = st.session_state.show_flashcard_answer
+        question = html.escape(str(card["front"]))
+        answer = html.escape(str(card["back"]))
+        flip_class = " is-flipped" if is_flipped else ""
+        st.caption(f"Card {card_index + 1} of {len(cards)}")
+        st.markdown(
+            f"""
+            <div class="flashcard-stage">
+                <div class="study-flashcard{flip_class}">
+                    <div class="flashcard-face flashcard-front">
+                        <div class="flashcard-label">QUESTION</div>
+                        <div class="flashcard-text">{question}</div>
+                        <div class="flashcard-hint">Think of your answer, then flip the card.</div>
+                    </div>
+                    <div class="flashcard-face flashcard-back">
+                        <div class="flashcard-label">ANSWER</div>
+                        <div class="flashcard-text">{answer}</div>
+                        <div class="flashcard-hint">Flip back when you’re ready to review.</div>
+                    </div>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        if st.button(
+            "Flip to question" if is_flipped else "Flip to answer",
+            key=f"flip_flashcard_{active_key}_{card_index}",
+        ):
+            st.session_state.show_flashcard_answer = not is_flipped
             st.rerun()
-        if st.session_state.show_flashcard_answer:
-            st.info(card["back"])
         previous, next_card = st.columns(2)
         with previous:
             if st.button("Previous", disabled=st.session_state.flashcard_index == 0):
