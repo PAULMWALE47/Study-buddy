@@ -1,13 +1,17 @@
 import io
 import html
 import json
+import math
 import os
 import re
+import struct
 import time
+import wave
 from datetime import datetime
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 from dotenv import load_dotenv
 from streamlit.errors import StreamlitSecretNotFoundError
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -202,12 +206,13 @@ def parse_json_response(response):
     return json.loads(cleaned)
 
 
-# Generate a small set of flashcards from retrieved document context.
+# Generate 50 flashcards from retrieved document context.
 def generate_flashcards(matches, topic=""):
     context = "\n\n".join(f"Source: {item['source']}\n{item['text']}" for item in matches)
     topic_line = f"Focus on this topic: {topic}." if topic else "Cover the most important concepts."
     prompt = (
-        "Use only the context below. Create about 10 useful study flashcards. "
+        "Use only the context below. Create exactly 50 distinct, concise study flashcards. "
+        "Avoid repeating the same fact. "
         'Return JSON only as an array of objects: [{"front": "...", "back": "..."}].\n'
         f"{topic_line}\n\nContext:\n{context}"
     )
@@ -216,13 +221,47 @@ def generate_flashcards(matches, topic=""):
         return []
     try:
         cards = parse_json_response(response)
-        if not isinstance(cards, list) or not all(
-            isinstance(card, dict) and card.get("front") and card.get("back") for card in cards
+        if not isinstance(cards, list) or len(cards) != 50 or not all(
+            isinstance(card, dict)
+            and isinstance(card.get("front"), str)
+            and isinstance(card.get("back"), str)
+            and card["front"].strip()
+            and card["back"].strip()
+            for card in cards
         ):
-            raise ValueError("The response did not contain valid flashcards.")
+            raise ValueError("The response did not contain exactly 50 valid flashcards.")
         return cards
     except (json.JSONDecodeError, ValueError) as error:
         st.error(f"Could not read the generated flashcards: {error}")
+        return []
+
+
+# Generate plain, open-ended practice questions from retrieved document context.
+def generate_practice_questions(matches, topic, number_of_questions):
+    context = "\n\n".join(f"Source: {item['source']}\n{item['text']}" for item in matches)
+    topic_line = f"Focus on this topic: {topic}." if topic else "Cover the key ideas in the notes."
+    prompt = (
+        f"Use only the context below. Create exactly {number_of_questions} short-answer practice questions. "
+        "These must be plain open-ended questions, not multiple-choice. Do not include answer options. "
+        'Return JSON only as an array of objects with "question", "answer", "explanation", "topic", '
+        'and "source" string fields.\n'
+        f"{topic_line}\n\nContext:\n{context}"
+    )
+    response = ask_model(prompt, want_json=True)
+    if not response:
+        return []
+    try:
+        questions = parse_json_response(response)
+        required_fields = ("question", "answer", "explanation", "topic", "source")
+        if not isinstance(questions, list) or len(questions) != number_of_questions or not all(
+            isinstance(question, dict)
+            and all(isinstance(question.get(field), str) and question[field].strip() for field in required_fields)
+            for question in questions
+        ):
+            raise ValueError("The response did not match the open-ended question format.")
+        return questions
+    except (json.JSONDecodeError, ValueError) as error:
+        st.error(f"Could not read the generated practice questions: {error}")
         return []
 
 
@@ -299,6 +338,142 @@ def mark_quiz(questions, selected_answers):
         "percent": percent,
         "completed_at": datetime.now().astimezone().isoformat(timespec="minutes"),
     }
+
+
+# Explain each selected wrong answer in one model call.
+def explain_wrong_answers(marked_questions, chunks, vectorizer, matrix, use_notes):
+    wrong_answers = [
+        (index, item)
+        for index, item in enumerate(marked_questions)
+        if not item["is_correct"] and item["selected_index"] is not None
+    ]
+    if not wrong_answers:
+        return {}
+
+    records = []
+    for index, item in wrong_answers:
+        record = {
+            "index": index,
+            "question": item["question"],
+            "student_answer": item["options"][item["selected_index"]],
+            "correct_answer": item["options"][item["answer_index"]],
+        }
+        if use_notes:
+            query = f"{item['question']} {record['student_answer']} {record['correct_answer']}"
+            matches = retrieve(query, vectorizer, matrix, chunks, top_k=2)
+            record["document_context"] = [
+                {"source": match["source"], "text": match["text"]} for match in matches
+            ]
+        records.append(record)
+
+    instruction = (
+        "Use only the document context in each item. Explain briefly why the student's answer is "
+        "incorrect and why the correct answer fits. If the context is not enough, say so."
+        if use_notes
+        else "Use general knowledge only; do not refer to uploaded notes. Explain briefly why the "
+        "student's answer is incorrect and why the correct answer fits."
+    )
+    prompt = (
+        f"{instruction} Return JSON only as an array of objects with integer 'index' and string "
+        "'explanation' fields.\n\nItems:\n"
+        + json.dumps(records, ensure_ascii=False)
+    )
+    response = ask_model(prompt, want_json=True)
+    if not response:
+        st.session_state["wrong_explanation_error"] = (
+            st.session_state.get("last_model_error") or "Gemini could not explain the missed answers."
+        )
+        return {}
+
+    try:
+        explanations = parse_json_response(response)
+        if not isinstance(explanations, list):
+            raise ValueError("The response was not a list.")
+        parsed_explanations = {
+            item["index"]: item["explanation"]
+            for item in explanations
+            if isinstance(item, dict)
+            and isinstance(item.get("index"), int)
+            and not isinstance(item.get("index"), bool)
+            and 0 <= item["index"] < len(marked_questions)
+            and isinstance(item.get("explanation"), str)
+        }
+        expected_indexes = {index for index, _ in wrong_answers}
+        if not expected_indexes.issubset(parsed_explanations):
+            raise ValueError("The response did not explain every incorrect answer.")
+        return parsed_explanations
+    except (json.JSONDecodeError, ValueError) as error:
+        st.session_state["wrong_explanation_error"] = f"Could not read the explanations: {error}"
+        return {}
+
+
+# Create a brief, low-volume two-note chime for positive quiz feedback.
+def make_success_sound():
+    sample_rate = 22050
+    audio_frames = bytearray()
+    for frequency, duration in ((660, 0.12), (880, 0.16)):
+        sample_count = int(sample_rate * duration)
+        for sample_index in range(sample_count):
+            fade = min(1, sample_index / (sample_rate * 0.01), (sample_count - sample_index) / (sample_rate * 0.04))
+            amplitude = 0.045 * max(0, fade)
+            value = int(32767 * amplitude * math.sin(2 * math.pi * frequency * sample_index / sample_rate))
+            audio_frames.extend(struct.pack("<h", value))
+
+    audio_file = io.BytesIO()
+    with wave.open(audio_file, "wb") as audio:
+        audio.setnchannels(1)
+        audio.setsampwidth(2)
+        audio.setframerate(sample_rate)
+        audio.writeframes(audio_frames)
+    return audio_file.getvalue()
+
+
+# Let the student hear a question and its choices with the browser's built-in speech.
+def render_question_reader(question, options, question_number):
+    spoken_text = html.escape(
+        f"Question {question_number}. {question}. "
+        + " ".join(f"Option {index + 1}: {option}." for index, option in enumerate(options))
+    )
+    button_id = f"read-question-{question_number}"
+    text_id = f"spoken-text-{question_number}"
+    components.html(
+        f"""
+        <style>
+            body {{ margin: 0; font-family: sans-serif; }}
+            button {{
+                border: 1px solid #8b5e3c;
+                border-radius: 9px;
+                padding: 0.45rem 0.8rem;
+                color: #fffcf5;
+                background: #8b5e3c;
+                font-weight: 600;
+                cursor: pointer;
+            }}
+            button:focus-visible {{ outline: 3px solid #c59b72; outline-offset: 2px; }}
+        </style>
+        <button id="{button_id}" type="button" aria-label="Read question and answer choices aloud">
+            Read question and choices aloud
+        </button>
+        <span id="{text_id}" hidden>{spoken_text}</span>
+        <script>
+            const readButton = document.getElementById("{button_id}");
+            readButton.addEventListener("click", () => {{
+                if (!("speechSynthesis" in window)) {{
+                    readButton.textContent = "Speech is not supported in this browser";
+                    return;
+                }}
+                window.speechSynthesis.cancel();
+                const utterance = new SpeechSynthesisUtterance(
+                    document.getElementById("{text_id}").textContent
+                );
+                utterance.rate = 0.92;
+                window.speechSynthesis.speak(utterance);
+            }});
+        </script>
+        """,
+        height=48,
+        scrolling=False,
+    )
 
 
 # Read saved quiz attempts so they remain available after restarting the app.
@@ -418,10 +593,16 @@ for key, default in {
     "active_flashcards_key": None,
     "flashcard_index": 0,
     "show_flashcard_answer": False,
+    "practice_cache": {},
+    "active_practice_key": None,
+    "practice_index": 0,
+    "show_practice_answer": False,
     "quiz_cache": {},
     "current_quiz_key": None,
     "quiz_submitted": False,
     "quiz_result": None,
+    "wrong_explanation_error": "",
+    "success_sound_played": False,
     "quiz_history": [],
     "history_version": 0,
     "history_loaded": False,
@@ -708,10 +889,17 @@ else:
         st.session_state["gemini_api_key"] = entered_api_key
     if not get_api_key():
         st.sidebar.caption("Gemini features need an API key. Retrieval-only mode works without one.")
-retrieval_only = st.sidebar.toggle("Retrieval-only mode (no AI)", value=False)
+answer_mode = st.sidebar.radio(
+    "Answer mode",
+    ["Use uploaded notes", "Use Gemini directly", "Retrieval-only Q&A"],
+    help=(
+        "Gemini directly ignores notes for Q&A and wrong-answer explanations. "
+        "Retrieval-only skips Gemini for Q&A. Quiz questions still use your notes."
+    ),
+)
 
-upload_tab, ask_tab, cards_tab, quiz_tab, report_tab = st.tabs(
-    ["Upload", "Questions", "Flashcards", "Quiz", "Report"]
+upload_tab, ask_tab, cards_tab, practice_tab, quiz_tab, report_tab = st.tabs(
+    ["Upload", "Questions", "Flashcards", "Practice", "Quiz", "Report"]
 )
 
 with upload_tab:
@@ -719,6 +907,7 @@ with upload_tab:
         "Choose study files",
         accept_multiple_files=True,
     )
+    st.caption("Supported: PDF, Word, PowerPoint (.pptx), text, Markdown, CSV, Excel, and PNG/JPG images.")
     if st.button("Process uploaded files", disabled=not uploaded_files):
         all_chunks = []
         statuses = []
@@ -757,13 +946,23 @@ with ask_tab:
                         st.write(match["text"])
     question = st.chat_input("Ask about your uploaded files")
     if question:
-        if not st.session_state.chunks:
-            st.warning("Upload and process study files before asking a question.")
+        matches = []
+        if answer_mode == "Use Gemini directly":
+            prompt = (
+                "Answer using your general knowledge only. Do not refer to uploaded documents or "
+                "claim that your answer came from a file. Explain the answer clearly and mention "
+                "uncertainty when appropriate.\n\n"
+                f"Question: {question}"
+            )
+            answer = ask_model(prompt)
+            if not answer:
+                answer = st.session_state.get("last_model_error") or "Gemini returned no answer."
+        elif not st.session_state.chunks:
+            answer = "Upload and process study files first, or select Gemini directly in the sidebar."
         else:
             matches = retrieve(question, st.session_state.vectorizer, st.session_state.matrix, st.session_state.chunks)
             sources = list(dict.fromkeys(match["source"] for match in matches))
-            st.session_state.chat_messages.append({"role": "user", "content": question})
-            if retrieval_only:
+            if answer_mode == "Retrieval-only Q&A":
                 answer = (
                     "Here are the most relevant chunks from your uploaded files."
                     if matches
@@ -784,20 +983,23 @@ with ask_tab:
                         answer = st.session_state.get("last_model_error") or "Gemini returned no answer."
                 else:
                     answer = "I couldn't find matching information in the uploaded files."
-            st.session_state.chat_messages.append(
-                {"role": "assistant", "content": answer, "matches": matches, "sources": sources}
-            )
-            st.rerun()
+        sources = list(dict.fromkeys(match["source"] for match in matches))
+        st.session_state.chat_messages.append({"role": "user", "content": question})
+        st.session_state.chat_messages.append(
+            {"role": "assistant", "content": answer, "matches": matches, "sources": sources}
+        )
+        st.rerun()
 
 # Cache generated flashcards so repeated clicks do not spend another API request.
 with cards_tab:
     st.subheader("Flashcards")
     card_topic = st.text_input("Optional topic for flashcards", key="card_topic")
-    if st.button("Generate flashcards"):
+    if st.button("Generate 50 flashcards"):
         if not st.session_state.chunks:
             st.warning("Upload and process study files before generating flashcards.")
         else:
-            cache_key = f"{st.session_state.document_version}:{card_topic.strip().lower()}"
+            normalized_topic = card_topic.strip().lower()
+            cache_key = f"{st.session_state.document_version}:50:{normalized_topic}"
             if cache_key not in st.session_state.flashcards_cache:
                 matches = retrieve(
                     card_topic or "important concepts terms definitions and facts",
@@ -818,7 +1020,10 @@ with cards_tab:
                 st.session_state.show_flashcard_answer = False
 
     active_key = st.session_state.active_flashcards_key
-    if active_key in st.session_state.flashcards_cache:
+    if (
+        active_key in st.session_state.flashcards_cache
+        and len(st.session_state.flashcards_cache[active_key]) == 50
+    ):
         cards = st.session_state.flashcards_cache[active_key]
         card_index = st.session_state.flashcard_index
         card = cards[card_index]
@@ -864,6 +1069,89 @@ with cards_tab:
                 st.session_state.show_flashcard_answer = False
                 st.rerun()
 
+# Generate plain short-answer questions that students can answer before revealing guidance.
+with practice_tab:
+    st.subheader("Open-ended practice")
+    st.caption("Practice with plain questions from your notes—there are no multiple-choice options.")
+    practice_topic = st.text_input("Optional topic for practice", key="practice_topic")
+    practice_count = st.slider(
+        "Number of practice questions",
+        min_value=5,
+        max_value=20,
+        value=10,
+        key="practice_question_count",
+    )
+    if st.button("Generate practice questions"):
+        if not st.session_state.chunks:
+            st.warning("Upload and process study files before generating practice questions.")
+        else:
+            normalized_topic = practice_topic.strip()
+            cache_key = (
+                f"{st.session_state.document_version}:{practice_count}:{normalized_topic.lower()}"
+            )
+            if cache_key not in st.session_state.practice_cache:
+                matches = retrieve(
+                    normalized_topic or "important concepts and facts",
+                    st.session_state.vectorizer,
+                    st.session_state.matrix,
+                    st.session_state.chunks,
+                    top_k=5,
+                )
+                if matches:
+                    questions = generate_practice_questions(matches, normalized_topic, practice_count)
+                    if questions:
+                        st.session_state.practice_cache[cache_key] = questions
+                else:
+                    st.warning("No matching document text was found for that topic.")
+            if cache_key in st.session_state.practice_cache:
+                st.session_state.active_practice_key = cache_key
+                st.session_state.practice_index = 0
+                st.session_state.show_practice_answer = False
+
+    active_practice_key = st.session_state.active_practice_key
+    if active_practice_key in st.session_state.practice_cache:
+        practice_questions = st.session_state.practice_cache[active_practice_key]
+        practice_index = st.session_state.practice_index
+        practice_item = practice_questions[practice_index]
+        st.caption(f"Question {practice_index + 1} of {len(practice_questions)}")
+        st.markdown(f"### {practice_item['question']}")
+        st.text_area(
+            "Your answer (optional)",
+            key=f"practice_answer_{active_practice_key}_{practice_index}",
+            disabled=st.session_state.show_practice_answer,
+        )
+        if st.button(
+            "Show suggested answer",
+            key=f"reveal_practice_{active_practice_key}_{practice_index}",
+            disabled=st.session_state.show_practice_answer,
+        ):
+            st.session_state.show_practice_answer = True
+            st.rerun()
+        if st.session_state.show_practice_answer:
+            st.markdown(f"**Suggested answer:** {practice_item['answer']}")
+            st.write(practice_item["explanation"])
+            st.caption(f"Topic: {practice_item['topic']} · Source: {practice_item['source']}")
+
+        previous, next_question = st.columns(2)
+        with previous:
+            if st.button(
+                "Previous",
+                key=f"previous_practice_{active_practice_key}_{practice_index}",
+                disabled=practice_index == 0,
+            ):
+                st.session_state.practice_index -= 1
+                st.session_state.show_practice_answer = False
+                st.rerun()
+        with next_question:
+            if st.button(
+                "Next",
+                key=f"next_practice_{active_practice_key}_{practice_index}",
+                disabled=practice_index >= len(practice_questions) - 1,
+            ):
+                st.session_state.practice_index += 1
+                st.session_state.show_practice_answer = False
+                st.rerun()
+
 # Load a cached quiz or generate one, then score it locally on submission.
 with quiz_tab:
     st.subheader("Quiz")
@@ -895,6 +1183,8 @@ with quiz_tab:
                 st.session_state.current_quiz_key = cache_key
                 st.session_state.quiz_submitted = False
                 st.session_state.quiz_result = None
+                st.session_state.success_sound_played = False
+                st.session_state.wrong_explanation_error = ""
 
     current_key = st.session_state.current_quiz_key
     if current_key in st.session_state.quiz_cache:
@@ -902,6 +1192,7 @@ with quiz_tab:
         selected_answers = {}
         for index, question_item in enumerate(questions):
             st.markdown(f"**{index + 1}. {question_item['question']}**")
+            render_question_reader(question_item["question"], question_item["options"], index + 1)
             option_key = f"quiz_answer_{current_key}_{index}"
             selected = st.radio(
                 "Choose one answer",
@@ -917,8 +1208,25 @@ with quiz_tab:
         if not st.session_state.quiz_submitted:
             if st.button("Submit quiz"):
                 result = mark_quiz(questions, selected_answers)
+                st.session_state.wrong_explanation_error = ""
+                if any(
+                    not item["is_correct"] and item["selected_index"] is not None
+                    for item in result["questions"]
+                ):
+                    with st.spinner("Explaining missed answers..."):
+                        explanations = explain_wrong_answers(
+                            result["questions"],
+                            st.session_state.chunks,
+                            st.session_state.vectorizer,
+                            st.session_state.matrix,
+                            use_notes=answer_mode != "Use Gemini directly",
+                        )
+                    for question_index, explanation in explanations.items():
+                        result["questions"][question_index]["wrong_explanation"] = explanation
+                    result["wrong_explanation_error"] = st.session_state.wrong_explanation_error
                 st.session_state.quiz_result = result
                 st.session_state.quiz_submitted = True
+                st.session_state.success_sound_played = False
                 st.session_state.quiz_history.append(result)
                 st.session_state.history_version += 1
                 try:
@@ -931,13 +1239,27 @@ with quiz_tab:
         if st.session_state.quiz_result:
             result = st.session_state.quiz_result
             st.markdown(f"## Score: {result['score']} / {result['total']} ({result['percent']}%)")
+            if result["score"] > 0 and not st.session_state.success_sound_played:
+                st.audio(make_success_sound(), format="audio/wav", autoplay=True)
+                st.caption("A soft chime plays when your submitted quiz includes a correct answer.")
+                st.session_state.success_sound_played = True
+            if result.get("wrong_explanation_error"):
+                st.info(result["wrong_explanation_error"])
             for index, item in enumerate(result["questions"]):
-                label = "Correct" if item["is_correct"] else "Wrong"
+                label = "Correct" if item["is_correct"] else (
+                    "Unanswered" if item["selected_index"] is None else "Wrong"
+                )
                 st.markdown(f"**{index + 1}. {label} — {item['topic']}**")
                 if not item["is_correct"]:
                     correct_answer = item["options"][item["answer_index"]]
+                    if item["selected_index"] is not None:
+                        st.write(f"Your answer: {item['options'][item['selected_index']]}")
                     st.write(f"Correct answer: {correct_answer}")
-                st.write(item["explanation"])
+                    st.markdown(f"**Why the correct answer is right:** {item['explanation']}")
+                    if item.get("wrong_explanation"):
+                        st.markdown(f"**Why your answer was wrong:** {item['wrong_explanation']}")
+                else:
+                    st.write(item["explanation"])
                 st.caption(f"Source: {item['source']}")
 
 # Build one cached revision report from all quiz attempts so far.
