@@ -435,6 +435,7 @@ def render_question_reader(question, options, question_number):
         + " ".join(f"Option {index + 1}: {option}." for index, option in enumerate(options))
     )
     button_id = f"read-question-{question_number}"
+    stop_button_id = f"stop-question-{question_number}"
     text_id = f"spoken-text-{question_number}"
     components.html(
         f"""
@@ -450,13 +451,21 @@ def render_question_reader(question, options, question_number):
                 cursor: pointer;
             }}
             button:focus-visible {{ outline: 3px solid #c59b72; outline-offset: 2px; }}
+            .reader-controls {{ display: flex; gap: 0.5rem; align-items: center; }}
+            #{stop_button_id} {{ color: #613e29; background: #f2e7d6; }}
         </style>
-        <button id="{button_id}" type="button" aria-label="Read question and answer choices aloud">
-            Read question and choices aloud
-        </button>
+        <div class="reader-controls">
+            <button id="{button_id}" type="button" aria-label="Read question and answer choices aloud">
+                Read question and choices aloud
+            </button>
+            <button id="{stop_button_id}" type="button" aria-label="Stop reading aloud">
+                Stop reading
+            </button>
+        </div>
         <span id="{text_id}" hidden>{spoken_text}</span>
         <script>
             const readButton = document.getElementById("{button_id}");
+            const stopButton = document.getElementById("{stop_button_id}");
             readButton.addEventListener("click", () => {{
                 if (!("speechSynthesis" in window)) {{
                     readButton.textContent = "Speech is not supported in this browser";
@@ -468,6 +477,11 @@ def render_question_reader(question, options, question_number):
                 );
                 utterance.rate = 0.92;
                 window.speechSynthesis.speak(utterance);
+            }});
+            stopButton.addEventListener("click", () => {{
+                if ("speechSynthesis" in window) {{
+                    window.speechSynthesis.cancel();
+                }}
             }});
         </script>
         """,
@@ -579,9 +593,17 @@ def build_study_report(history, chunks, vectorizer, matrix):
     return "\n".join(lines)
 
 
+def focus_questions_when_gemini_selected():
+    if st.session_state.answer_mode == "Use Gemini directly":
+        st.session_state.study_tabs = "Questions"
+
+
 # Initialize the values that persist while this browser session is open.
 st.set_page_config(page_title="Study Buddy RAG", page_icon="📚", layout="wide")
 for key, default in {
+    "answer_mode": "Use uploaded notes",
+    "study_tabs": "Upload",
+    "dark_mode": False,
     "chunks": [],
     "vectorizer": None,
     "matrix": None,
@@ -656,12 +678,48 @@ st.markdown(
         padding-bottom: 3rem;
     }
     .study-hero {
+        position: relative;
+        isolation: isolate;
+        overflow: hidden;
         padding: 2rem 2.2rem;
         margin-bottom: 1.5rem;
         border: 1px solid #e5d2bd;
         border-radius: 22px;
         background: linear-gradient(120deg, #fffdf8 15%, #f1e4d2 100%);
         box-shadow: 0 12px 32px rgba(62, 42, 32, 0.07);
+    }
+    .study-hero::before,
+    .study-hero::after {
+        content: "";
+        position: absolute;
+        z-index: 0;
+        pointer-events: none;
+    }
+    .study-hero::before {
+        top: -30%;
+        right: -7%;
+        width: 70%;
+        height: 150%;
+        border-radius: 48%;
+        background:
+            radial-gradient(ellipse at 45% 45%, rgba(110, 169, 176, 0.1), transparent 70%),
+            repeating-radial-gradient(ellipse at 55% 48%, transparent 0 20px, rgba(91, 147, 155, 0.13) 21px 23px, transparent 24px 43px);
+        background-size: 100% 100%, 135% 135%;
+        animation: study-water-ripples 14s ease-in-out infinite alternate;
+    }
+    .study-hero::after {
+        right: -12%;
+        bottom: -62%;
+        width: 82%;
+        height: 125%;
+        border-radius: 48%;
+        background: repeating-linear-gradient(166deg, transparent 0 17px, rgba(112, 163, 168, 0.11) 18px 20px, transparent 21px 40px);
+        background-size: 140% 180%;
+        animation: study-water-flow 18s linear infinite;
+    }
+    .study-hero > * {
+        position: relative;
+        z-index: 1;
     }
     .study-hero .eyebrow {
         color: var(--accent);
@@ -688,7 +746,7 @@ st.markdown(
         gap: 0.4rem;
         border-bottom: 1px solid var(--line);
     }
-    div[data-testid="stTabs"] button[role="tab"] {
+    div[data-testid="stTabs"] [role="tab"] {
         min-height: 3rem;
         padding: 0.65rem 1rem;
         border-radius: 12px 12px 0 0;
@@ -696,11 +754,11 @@ st.markdown(
         opacity: 1 !important;
         font-weight: 650;
     }
-    div[data-testid="stTabs"] button[role="tab"] p {
+    div[data-testid="stTabs"] [role="tab"] p {
         color: inherit !important;
         opacity: 1 !important;
     }
-    div[data-testid="stTabs"] button[role="tab"][aria-selected="true"] {
+    div[data-testid="stTabs"] [role="tab"][aria-selected="true"] {
         color: var(--accent) !important;
         background: #f1e5d4;
     }
@@ -778,6 +836,76 @@ st.markdown(
         color: var(--ink) !important;
         background: transparent !important;
     }
+    div[data-testid="stChatInput"] {
+        overflow: hidden;
+        border: 1px solid #d8c8b5 !important;
+        border-radius: 18px !important;
+        background: #fffdf8 !important;
+        box-shadow: 0 8px 22px rgba(62, 42, 32, 0.1);
+        transition: border-color 160ms ease, box-shadow 160ms ease;
+    }
+    div[data-testid="stChatInput"]:focus-within {
+        border-color: #a77a52 !important;
+        box-shadow: 0 0 0 3px rgba(167, 122, 82, 0.16), 0 10px 24px rgba(62, 42, 32, 0.12);
+    }
+    div[data-testid="stChatInput"] textarea {
+        min-height: 2.8rem !important;
+        padding: 0.65rem 0.8rem !important;
+        color: var(--ink) !important;
+    }
+    div[data-testid="stChatInput"] button {
+        border-radius: 12px !important;
+        color: #fffaf3 !important;
+        background: #8b5e3c !important;
+    }
+    .gemini-mode-banner {
+        display: flex;
+        align-items: center;
+        gap: 1rem;
+        padding: 1rem 1.2rem;
+        margin: 0.6rem 0 1.2rem;
+        border: 1px solid #d8cdf7;
+        border-radius: 18px;
+        background: linear-gradient(115deg, #f8f4ff 0%, #eef4ff 55%, #fffdf8 100%);
+        background-size: 180% 180%;
+        box-shadow: 0 10px 24px rgba(77, 67, 133, 0.08);
+        animation:
+            gemini-banner-enter 520ms cubic-bezier(0.2, 0.75, 0.25, 1) both,
+            gemini-gradient-drift 8s ease-in-out 520ms infinite alternate;
+    }
+    .gemini-mode-icon {
+        display: grid;
+        flex: 0 0 2.6rem;
+        width: 2.6rem;
+        height: 2.6rem;
+        place-items: center;
+        border-radius: 14px;
+        color: #fff;
+        background: linear-gradient(145deg, #9274e8, #587ad8);
+        font-size: 1.35rem;
+        animation: gemini-sparkle-float 3s ease-in-out infinite;
+    }
+    .gemini-mode-title {
+        margin: 0;
+        color: #40336f;
+        font-weight: 750;
+    }
+    .gemini-mode-copy {
+        margin: 0.15rem 0 0;
+        color: #6d648d;
+        font-size: 0.9rem;
+    }
+    .gemini-mode-pill {
+        margin-left: auto;
+        padding: 0.35rem 0.7rem;
+        border: 1px solid #d4c9f5;
+        border-radius: 999px;
+        color: #5e4caa;
+        background: rgba(255, 255, 255, 0.72);
+        font-size: 0.72rem;
+        font-weight: 750;
+        letter-spacing: 0.08em;
+    }
     [data-testid="stAlert"] {
         border-radius: 12px;
     }
@@ -842,6 +970,26 @@ st.markdown(
         color: var(--muted);
         font-size: 0.9rem;
     }
+    @keyframes gemini-banner-enter {
+        from { opacity: 0; transform: translateY(10px) scale(0.99); }
+        to { opacity: 1; transform: translateY(0) scale(1); }
+    }
+    @keyframes gemini-gradient-drift {
+        from { background-position: 0% 50%; }
+        to { background-position: 100% 50%; }
+    }
+    @keyframes gemini-sparkle-float {
+        0%, 100% { transform: translateY(0) rotate(-6deg); }
+        50% { transform: translateY(-4px) rotate(6deg); }
+    }
+    @keyframes study-water-ripples {
+        from { transform: translate3d(0, 0, 0) scale(0.98); background-position: 0 0, 0 0; }
+        to { transform: translate3d(-14px, 7px, 0) scale(1.04); background-position: 0 0, 28px -16px; }
+    }
+    @keyframes study-water-flow {
+        from { transform: translate3d(8px, 0, 0) rotate(-3deg); background-position: 0 0; }
+        to { transform: translate3d(-12px, -8px, 0) rotate(-3deg); background-position: 72px 54px; }
+    }
     @keyframes flashcard-arrive {
         from { opacity: 0; transform: translateY(12px) scale(0.985); }
         to { opacity: 1; transform: translateY(0) scale(1); }
@@ -849,6 +997,10 @@ st.markdown(
     @media (prefers-reduced-motion: reduce) {
         .flashcard-stage { animation: none; }
         .study-flashcard { transition: none; }
+        .study-hero::before,
+        .study-hero::after { animation: none; }
+        .gemini-mode-banner,
+        .gemini-mode-icon { animation: none; }
     }
     @media (max-width: 700px) {
         .block-container {
@@ -857,6 +1009,18 @@ st.markdown(
         .study-hero {
             padding: 1.4rem;
             border-radius: 16px;
+        }
+        .study-hero::before {
+            top: -20%;
+            right: -35%;
+            width: 90%;
+            height: 140%;
+        }
+        .study-hero::after {
+            right: -30%;
+            bottom: -55%;
+            width: 100%;
+            height: 120%;
         }
     }
     </style>
@@ -877,6 +1041,141 @@ st.markdown(
 )
 st.sidebar.header("Settings")
 st.sidebar.caption("AI setup and demo options")
+dark_mode = st.sidebar.toggle(
+    "Dark mode",
+    key="dark_mode",
+    help="Switch the study app to a dark color theme for this browser session.",
+)
+if dark_mode:
+    st.markdown(
+        """
+        <style>
+        :root {
+            --ink: #f1e8dc !important;
+            --muted: #c1b2a1 !important;
+            --accent: #d6a878 !important;
+            --line: #51463d !important;
+            --surface: #2b2622 !important;
+        }
+        [data-testid="stAppViewContainer"],
+        [data-testid="stMain"] {
+            background: #1d1a18 !important;
+            color: var(--ink) !important;
+        }
+        [data-testid="stHeader"] {
+            background: transparent !important;
+        }
+        [data-testid="stSidebar"] {
+            background: #29231f !important;
+            border-right-color: #494039 !important;
+        }
+        [data-testid="stSidebar"] h1,
+        [data-testid="stSidebar"] h2,
+        [data-testid="stSidebar"] h3,
+        [data-testid="stSidebar"] label,
+        [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p {
+            color: var(--ink) !important;
+        }
+        [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p {
+            color: var(--muted) !important;
+        }
+        .study-hero {
+            border-color: #51463d !important;
+            background: linear-gradient(120deg, #302923 15%, #28231f 100%) !important;
+        }
+        .study-hero::before {
+            background:
+                radial-gradient(ellipse at 45% 45%, rgba(119, 170, 212, 0.12), transparent 70%),
+                repeating-radial-gradient(ellipse at 55% 48%, transparent 0 20px, rgba(116, 171, 203, 0.18) 21px 23px, transparent 24px 43px);
+        }
+        .study-hero::after {
+            background: repeating-linear-gradient(166deg, transparent 0 17px, rgba(107, 159, 195, 0.15) 18px 20px, transparent 21px 40px);
+        }
+        .study-hero h1 {
+            color: #f6ede2 !important;
+        }
+        .study-hero p,
+        .study-hero .eyebrow {
+            color: #d2bda5 !important;
+        }
+        div[data-testid="stTabs"] [role="tab"] {
+            border: 1px solid #554a40 !important;
+            color: #f1e8dc !important;
+            background: #302a25 !important;
+        }
+        div[data-testid="stTabs"] [role="tab"] p {
+            color: inherit !important;
+            opacity: 1 !important;
+        }
+        div[data-testid="stTabs"] [role="tab"]:hover:not([aria-selected="true"]) {
+            color: #fffaf3 !important;
+            background: #403831 !important;
+        }
+        div[data-testid="stTabs"] [role="tab"][aria-selected="true"] {
+            border-color: #896a4e !important;
+            color: #f0c28f !important;
+            background: #40362e !important;
+        }
+        div[data-testid="stChatMessage"],
+        div[data-testid="stFileUploader"],
+        div[data-testid="stExpander"],
+        div[data-testid="stMetric"] {
+            border-color: #51463d !important;
+            background: #292522 !important;
+            color: var(--ink) !important;
+        }
+        div[data-testid="stFileUploader"] [data-testid="stFileUploaderDropzone"] {
+            border-color: #76634f !important;
+            background: #302a25 !important;
+        }
+        [data-baseweb="input"] > div,
+        [data-baseweb="textarea"] > div,
+        [data-baseweb="select"] > div {
+            border-color: #5a4d41 !important;
+            background: #302a25 !important;
+        }
+        [data-baseweb="input"] input,
+        [data-baseweb="textarea"] textarea,
+        [data-baseweb="select"] input {
+            color: var(--ink) !important;
+        }
+        html body div[data-testid="stChatInput"] {
+            border-color: #5a4d41 !important;
+            background: #302a25 !important;
+        }
+        div[data-testid="stChatInput"]:focus-within {
+            border-color: #bd8f61 !important;
+        }
+        .gemini-mode-banner {
+            border-color: #554c72 !important;
+            background: linear-gradient(115deg, #302a40 0%, #272e40 55%, #2c2927 100%) !important;
+        }
+        .gemini-mode-title {
+            color: #e4d9ff !important;
+        }
+        .gemini-mode-copy {
+            color: #c4b8e3 !important;
+        }
+        .gemini-mode-pill {
+            border-color: #63568a !important;
+            color: #e4d9ff !important;
+            background: #373149 !important;
+        }
+        div[data-testid="stMain"] .flashcard-front {
+            border-color: #51463d !important;
+            background: linear-gradient(135deg, #302a25 10%, #28231f 100%) !important;
+        }
+        div[data-testid="stMain"] .flashcard-back {
+            border-color: #64503b !important;
+            background: linear-gradient(135deg, #382d23 10%, #2b241f 100%) !important;
+        }
+        [data-testid="stAlert"] {
+            color: var(--ink) !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 if get_api_key():
     st.sidebar.caption("Gemini is configured by the app owner.")
 else:
@@ -892,6 +1191,8 @@ else:
 answer_mode = st.sidebar.radio(
     "Answer mode",
     ["Use uploaded notes", "Use Gemini directly", "Retrieval-only Q&A"],
+    key="answer_mode",
+    on_change=focus_questions_when_gemini_selected,
     help=(
         "Gemini directly ignores notes for Q&A and wrong-answer explanations. "
         "Retrieval-only skips Gemini for Q&A. Quiz questions still use your notes."
@@ -899,7 +1200,9 @@ answer_mode = st.sidebar.radio(
 )
 
 upload_tab, ask_tab, cards_tab, practice_tab, quiz_tab, report_tab = st.tabs(
-    ["Upload", "Questions", "Flashcards", "Practice", "Quiz", "Report"]
+    ["Upload", "Questions", "Flashcards", "Practice", "Quiz", "Report"],
+    key="study_tabs",
+    on_change="rerun",
 )
 
 with upload_tab:
@@ -935,6 +1238,34 @@ with upload_tab:
 # Answer from retrieved context, or show the matches without using Gemini.
 with ask_tab:
     st.subheader("Ask Questions")
+    if answer_mode == "Use Gemini directly":
+        st.markdown(
+            """
+            <style>
+            div[data-testid="stChatInput"] {
+                border-color: #9b83e5 !important;
+                background: linear-gradient(120deg, #fffdfd, #f5f1ff) !important;
+                box-shadow: 0 10px 26px rgba(100, 79, 181, 0.16);
+            }
+            div[data-testid="stChatInput"]:focus-within {
+                border-color: #765bd0 !important;
+                box-shadow: 0 0 0 3px rgba(118, 91, 208, 0.2), 0 12px 28px rgba(100, 79, 181, 0.2);
+            }
+            div[data-testid="stChatInput"] button {
+                background: linear-gradient(135deg, #9274e8, #587ad8) !important;
+            }
+            </style>
+            <section class="gemini-mode-banner">
+                <div class="gemini-mode-icon" aria-hidden="true">✦</div>
+                <div>
+                    <p class="gemini-mode-title">Gemini Direct</p>
+                    <p class="gemini-mode-copy">A fresh answer from Gemini’s general knowledge, separate from your notes.</p>
+                </div>
+                <span class="gemini-mode-pill">AI ON</span>
+            </section>
+            """,
+            unsafe_allow_html=True,
+        )
     for index, message in enumerate(st.session_state.chat_messages):
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
@@ -944,7 +1275,11 @@ with ask_tab:
                     for match in message["matches"]:
                         st.markdown(f"**{match['source']} — similarity {match['score']:.3f}**")
                         st.write(match["text"])
-    question = st.chat_input("Ask about your uploaded files")
+    chat_placeholder = (
+        "Ask Gemini anything..." if answer_mode == "Use Gemini directly"
+        else "Ask about your uploaded files"
+    )
+    question = st.chat_input(chat_placeholder)
     if question:
         matches = []
         if answer_mode == "Use Gemini directly":
