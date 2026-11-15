@@ -6,6 +6,8 @@ import os
 import re
 import struct
 import time
+import urllib.error
+import urllib.request
 import wave
 from datetime import datetime
 
@@ -23,6 +25,46 @@ load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
 
 # Change this one value if the selected Gemini model is unavailable.
 MODEL_NAME = "gemini-3.5-flash-lite"
+
+QUOTE_API_URL = "https://zenquotes.io/api/quotes"
+QUOTE_MAX_COUNT = 30
+QUOTE_SECONDS_PER_SLIDE = 10
+QUOTE_SLIDESHOW_VERSION = 2
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_motivational_quotes():
+    request = urllib.request.Request(
+        QUOTE_API_URL,
+        headers={"User-Agent": "StudyBuddyRAG/1.0"},
+    )
+    with urllib.request.urlopen(request, timeout=4) as response:
+        quote_data = json.loads(response.read(150_000).decode("utf-8"))
+
+    if not isinstance(quote_data, list):
+        raise ValueError("The quote service returned an unexpected response.")
+
+    quotes = []
+    seen = set()
+    for item in quote_data:
+        if not isinstance(item, dict):
+            continue
+        text = item.get("q")
+        author = item.get("a")
+        if not isinstance(text, str) or not isinstance(author, str):
+            continue
+        text = text.strip()
+        author = author.strip()
+        if not text or not author or text in seen or len(text) > 140:
+            continue
+        seen.add(text)
+        quotes.append({"text": text, "author": author})
+        if len(quotes) == QUOTE_MAX_COUNT:
+            break
+
+    if not quotes:
+        raise ValueError("The quote service did not return any usable quotes.")
+    return quotes
 
 
 # Read the key from the local environment, Streamlit Cloud secrets, or the local session input.
@@ -598,12 +640,35 @@ def focus_questions_when_gemini_selected():
         st.session_state.study_tabs = "Questions"
 
 
+def focus_latest_chat_answer():
+    components.html(
+        """
+        <script>
+        const parentDocument = window.parent.document;
+        const marker = parentDocument.getElementById("study-buddy-latest-answer");
+        const message = marker && marker.closest('[data-testid="stChatMessage"]');
+        if (message) {
+            message.setAttribute("tabindex", "-1");
+            message.focus({preventScroll: true});
+            message.scrollIntoView({behavior: "smooth", block: "center"});
+        }
+        </script>
+        """,
+        height=0,
+        scrolling=False,
+    )
+
+
 # Initialize the values that persist while this browser session is open.
 st.set_page_config(page_title="Study Buddy RAG", page_icon="📚", layout="wide")
 for key, default in {
     "answer_mode": "Use uploaded notes",
     "study_tabs": "Upload",
     "dark_mode": False,
+    "focus_latest_answer": False,
+    "motivational_quotes": None,
+    "quote_api_error": "",
+    "quote_slideshow_version": 0,
     "chunks": [],
     "vectorizer": None,
     "matrix": None,
@@ -632,6 +697,12 @@ for key, default in {
     "report_cache": {},
 }.items():
     st.session_state.setdefault(key, default)
+
+# Refresh quotes cached by an older slideshow version in an open browser session.
+if st.session_state.quote_slideshow_version != QUOTE_SLIDESHOW_VERSION:
+    st.session_state.motivational_quotes = None
+    st.session_state.quote_api_error = ""
+    st.session_state.quote_slideshow_version = QUOTE_SLIDESHOW_VERSION
 
 # Load saved attempts once for this browser session.
 if not st.session_state.history_loaded:
@@ -741,6 +812,44 @@ st.markdown(
         color: var(--muted);
         font-size: 1.02rem;
         line-height: 1.65;
+    }
+    .study-hero-quotes {
+        position: relative;
+        min-height: 8.5rem;
+        max-width: 650px;
+        margin-top: 0.3rem;
+    }
+    .study-hero .study-hero-quote {
+        position: absolute;
+        inset: 0 auto auto 0;
+        width: 100%;
+        margin: 0;
+        color: var(--muted);
+        font-size: clamp(1.15rem, 2vw, 1.35rem);
+        font-style: italic;
+        line-height: 1.5;
+        opacity: 0;
+        transform: translateY(8px);
+        animation: study-quote-cycle var(--quote-duration, 24s) ease-in-out infinite;
+    }
+    .study-hero-quote-author {
+        display: block;
+        margin-top: 0.4rem;
+        color: var(--accent);
+        font-size: 0.88rem;
+        font-style: normal;
+        font-weight: 650;
+    }
+    .study-hero-quote-source {
+        display: block;
+        margin-top: 0.6rem;
+        color: var(--muted);
+        font-size: 0.74rem;
+    }
+    .study-hero-quote-source a {
+        color: inherit;
+        text-decoration: underline;
+        text-underline-offset: 2px;
     }
     div[data-testid="stTabs"] > div[role="tablist"] {
         gap: 0.4rem;
@@ -999,6 +1108,16 @@ st.markdown(
         .study-flashcard { transition: none; }
         .study-hero::before,
         .study-hero::after { animation: none; }
+        .study-hero .study-hero-quote {
+            position: static;
+            display: none;
+            transform: none;
+            animation: none;
+        }
+        .study-hero .study-hero-quote:first-child {
+            display: block;
+            opacity: 1;
+        }
         .gemini-mode-banner,
         .gemini-mode-icon { animation: none; }
     }
@@ -1009,6 +1128,9 @@ st.markdown(
         .study-hero {
             padding: 1.4rem;
             border-radius: 16px;
+        }
+        .study-hero-quotes {
+            min-height: 10rem;
         }
         .study-hero::before {
             top: -20%;
@@ -1028,17 +1150,70 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# Collect the user's study materials and build the retrieval index.
-st.markdown(
-    """
+# Load and cache motivational quotes for this browser session.
+if st.session_state.motivational_quotes is None:
+    try:
+        st.session_state.motivational_quotes = fetch_motivational_quotes()
+    except (
+        urllib.error.URLError,
+        TimeoutError,
+        OSError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        ValueError,
+    ) as error:
+        st.session_state.quote_api_error = str(error)
+        st.session_state.motivational_quotes = [
+            {"text": "Small steps, repeated daily, can take you further than a perfect plan.", "author": "Study Buddy"},
+            {"text": "Every question you ask is a chance to understand something more deeply.", "author": "Study Buddy"},
+            {"text": "Progress is not always fast, but every focused minute counts.", "author": "Study Buddy"},
+            {"text": "Keep showing up for your future self. Your effort is building something.", "author": "Study Buddy"},
+        ]
+
+quote_duration = len(st.session_state.motivational_quotes) * QUOTE_SECONDS_PER_SLIDE
+quote_slot = 100 / len(st.session_state.motivational_quotes)
+quote_keyframes = f"""
+<style>
+@keyframes study-quote-cycle {{
+    0%, {quote_slot * 0.08:.4f}% {{ opacity: 0; transform: translateY(8px); }}
+    {quote_slot * 0.12:.4f}%, {quote_slot * 0.82:.4f}% {{ opacity: 1; transform: translateY(0); }}
+    {quote_slot * 0.92:.4f}%, 100% {{ opacity: 0; transform: translateY(-8px); }}
+}}
+</style>
+"""
+quote_slides = "".join(
+    (
+        f'<p class="study-hero-quote" style="animation-delay: '
+        f'{0 if index == 0 else -(quote_duration - index * QUOTE_SECONDS_PER_SLIDE)}s;">'
+        f'{html.escape(quote["text"])}'
+        f'<span class="study-hero-quote-author">— {html.escape(quote["author"])}</span>'
+        "</p>"
+    )
+    for index, quote in enumerate(st.session_state.motivational_quotes)
+)
+quote_credit = (
+    '<span class="study-hero-quote-source">Quotes provided by '
+    '<a href="https://zenquotes.io/" target="_blank" rel="noopener noreferrer">ZenQuotes</a></span>'
+    if not st.session_state.quote_api_error
+    else '<span class="study-hero-quote-source">Original Study Buddy reminders</span>'
+)
+
+# Render the hero as HTML so Streamlit does not treat the markup as a Markdown code block.
+hero_html = f"""
+    {quote_keyframes}
     <section class="study-hero">
         <div class="eyebrow">Your personal study space</div>
         <h1>Study Buddy</h1>
-        <p>Turn your notes into clear answers, focused flashcards, and quizzes that help you learn with confidence.</p>
+        <div class="study-hero-quotes" aria-label="Motivational study quotes"
+             style="--quote-duration: {quote_duration}s;">
+            {quote_slides}
+        </div>
+        {quote_credit}
     </section>
-    """,
-    unsafe_allow_html=True,
-)
+    """
+st.html(hero_html)
+if st.session_state.quote_api_error:
+    st.caption("Live quotes are temporarily unavailable, so built-in motivational quotes are shown.")
 st.sidebar.header("Settings")
 st.sidebar.caption("AI setup and demo options")
 dark_mode = st.sidebar.toggle(
@@ -1275,11 +1450,19 @@ with ask_tab:
                     for match in message["matches"]:
                         st.markdown(f"**{match['source']} — similarity {match['score']:.3f}**")
                         st.write(match["text"])
+            if message["role"] == "assistant" and index == len(st.session_state.chat_messages) - 1:
+                st.html(
+                    '<span id="study-buddy-latest-answer" '
+                    'aria-label="Latest answer from Study Buddy"></span>'
+                )
     chat_placeholder = (
         "Ask Gemini anything..." if answer_mode == "Use Gemini directly"
         else "Ask about your uploaded files"
     )
     question = st.chat_input(chat_placeholder)
+    if st.session_state.focus_latest_answer:
+        focus_latest_chat_answer()
+        st.session_state.focus_latest_answer = False
     if question:
         matches = []
         if answer_mode == "Use Gemini directly":
@@ -1323,6 +1506,7 @@ with ask_tab:
         st.session_state.chat_messages.append(
             {"role": "assistant", "content": answer, "matches": matches, "sources": sources}
         )
+        st.session_state.focus_latest_answer = True
         st.rerun()
 
 # Cache generated flashcards so repeated clicks do not spend another API request.
